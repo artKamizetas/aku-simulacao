@@ -1,0 +1,101 @@
+# ==============================================================
+# CONFIGURAÇÕES DO SISTEMA
+# Este arquivo substitui a aba CONFIGURACOES do Google Sheets.
+# Edite os valores abaixo conforme sua operação.
+# ==============================================================
+
+# --- FONTE DE DADOS ---
+fonte:
+  # Nome da fonte de dados (Google Sheets em produção)
+  nome: "Google Sheets — Bling ERP"
+
+# --- DEPÓSITOS ---
+# IMPORTANTE: No Bling, "Loja" e "Depósito" são entidades diferentes.
+# Loja ID → aparece nos Pedidos (onde a venda aconteceu)
+# Depósito ID → aparece no EstoqueV3 (onde o estoque está armazenado)
+# Uma loja física tem AMBOS os IDs.
+depositos:
+  central:
+    deposito_id: "11105614627"   # Depósito "Estoque" (CD)
+    nome: "Estoque Central"
+
+  lojas:
+  - nome: "Natal"
+    loja_id: "203379922"         # Loja "AKU - Natal" (usado em Pedidos)
+    deposito_id: "7011018386"    # Depósito "Natal - Loja" (usado em EstoqueV3)
+  - nome: "Mossoró"
+    loja_id: "203575032"         # Loja "AKU - Mossoró" (usado em Pedidos)
+    deposito_id: "14887086441"   # Depósito "Mossoró - Loja" (usado em EstoqueV3)
+
+# --- LOGÍSTICA (Reposição de Loja) ---
+logistica:
+  vm_padrao: 10              # Visual Merchandising — exposição mínima padrão
+  dias_analise_giro: 30      # Janela de dias para calcular giro
+  dias_cobertura_minima: 15  # Dias de estoque mínimo na loja
+
+# --- DAILY (Comercial / Metas) ---
+daily:
+  # IDs de situação que contam como VENDA EFETIVA
+  # 9 = Atendido. Adicione outros se necessário (ex: 28487 = Enviado)
+  situacoes_venda: [9]
+
+  # IDs de status de pedido para exibição no dashboard
+  status_ids:
+    em_aberto: 6
+    em_andamento: 15
+    pronto_retirada: 28488
+
+  # Metas financeiras do mês atual (R$)
+  metas:
+    Natal: 70000.0
+    Mossoró: 50000.0
+
+# --- PCP / FÁBRICA ---
+fabrica:
+  # Período histórico para calcular média de demanda
+  data_inicio: "2025-04-01"
+  data_fim: "2026-03-31"
+
+  crescimento_pct: 10.0      # % de expectativa de crescimento sobre a média
+  sazonalidade: 1.0          # Multiplicador de sazonalidade (ex: 5.0 para alta temporada)
+  cobertura_meses: 2         # Meses de estoque meta
+  correcao_manual: 0         # Ajuste fixo somado à demanda projetada (global)
+
+  # IDs de situação que representam BACKLOG (consomem estoque sem faturar)
+  situacoes_backlog: [6, 15]
+
+# --- PLANEJAMENTO DE PRODUÇÃO ANUAL ---
+# Define as rodadas de produção ao longo do ano.
+# Cada rodada dispara um pedido à fábrica que deve cobrir a demanda
+# até a próxima rodada chegar (+ buffer de segurança).
+planejamento:
+  # Meses em que os pedidos são disparados para a fábrica
+  # Cada rodada cobre da sua data até a próxima rodada
+  rodadas:                      # Março, Julho, Novembro
+
+  # Lead time de produção (semanas) — tempo entre disparar e receber
+  - 3
+  - 7
+  - 11
+  lead_time_semanas: 4
+
+  # Buffer de segurança (% extra sobre a demanda do período)
+  buffer_pct: 10
+
+  # Período histórico para calcular SAZONALIDADE e MÉDIA MENSAL
+  # IMPORTANTE: Use o período mais amplo possível (ideal: 12+ meses).
+  # Se só tem dados de Out-Mar (alta), o sistema normaliza automaticamente
+  # para extrapolar a demanda dos meses de baixa.
+  # Com mais histórico = projeção mais precisa.
+  sazonalidade_inicio: "2025-01-01"
+  sazonalidade_fim: "2026-02-28"
+
+# --- EXCEÇÕES POR SKU ---
+# Sobrescreve regras globais para produtos específicos.
+# Campos opcionais: vm, dias_analise, dias_min, sazonalidade, correcao
+excecoes_sku:
+  # Exemplo:
+  # "ABC-PP":
+  #   vm: 5
+  #   sazonalidade: 3.0
+  #   dias_analise: 60

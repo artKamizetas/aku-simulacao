@@ -1,0 +1,108 @@
+"""
+exportar_vm.py — Exporta VM + Pulmão calculados para Excel
+
+Gera a planilha VM_Calculado.xlsx na pasta data/ com o resultado
+do cálculo de VM dinâmico e pulmão para todos os SKUs.
+
+Uso:
+    python exportar_vm.py
+"""
+
+import sys
+import yaml
+import time
+from pathlib import Path
+
+BASE = Path(__file__).parent
+sys.path.insert(0, str(BASE))
+
+from etl.loader import carregar_dados
+from etl.vm_dinamico import carregar_parametros_vm, calcular_vm_por_sku
+
+
+def main():
+    t0 = time.time()
+
+    with open(BASE / "config.yaml", "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    # Carrega dados
+    print("Carregando dados Bling...", end=" ", flush=True)
+    caminho_excel = BASE / "data" / config["fonte"]["arquivo"]
+    dados = carregar_dados(str(caminho_excel))
+    print(f"OK ({time.time()-t0:.1f}s)")
+
+    if not dados["validacao"]["ok"]:
+        print(f"ERRO: {dados['validacao']['erros']}")
+        return
+
+    # Carrega parâmetros
+    print("Carregando parâmetros VM...", end=" ", flush=True)
+    params = carregar_parametros_vm(str(BASE / "data" / "Parametros_VM.xlsx"))
+    if not params["ok"]:
+        print(f"ERRO: {params['erros']}")
+        return
+    print("OK")
+
+    # Calcula VM
+    print("Calculando VM + Pulmão...", end=" ", flush=True)
+    t1 = time.time()
+    vm_map = calcular_vm_por_sku(dados, params)
+    print(f"OK — {len(vm_map)} SKUs ({time.time()-t1:.1f}s)")
+
+    # Monta DataFrame
+    import pandas as pd
+
+    rows = []
+    for sku, info in vm_map.items():
+        rows.append({
+            "SKU": sku,
+            "Colégio": info["colegio"],
+            "VM (prateleira)": info["vm"],
+            "Pulmão (armário)": info["pulmao"],
+            "Total na Loja": info["total"],
+            "Fonte VM": info["fonte_vm"],
+            "D Alta (pçs/dia)": info["d_alta"],
+            "PA (pçs/atend)": info["pa"],
+            "σ Diário": info["sigma"],
+            "Pedidos/Dia": info["pedidos_dia"],
+            "Vendas Alta": info["vendas_alta"],
+            "Pedidos Alta": info["pedidos_alta"],
+            "Taxa Cresc.": info["taxa_cresc"],
+            "Correção": info["correcao"],
+            "Nível Serviço": info["nivel_servico"],
+            "Z": info["z"],
+            "Lead Time": info["lead_time"],
+        })
+
+    df = pd.DataFrame(rows)
+    df = df.sort_values("Total na Loja", ascending=False).reset_index(drop=True)
+
+    # Salva
+    saida = BASE / "data" / "VM_Calculado.xlsx"
+    df.to_excel(str(saida), index=False, sheet_name="VM_Calculado")
+    print(f"\n✅ Exportado: {saida}")
+    print(f"   {len(df)} SKUs | Tempo total: {time.time()-t0:.1f}s")
+
+    # Resumo
+    print(f"\n--- Resumo ---")
+    print(f"VM médio:     {df['VM (prateleira)'].mean():.1f}")
+    print(f"Pulmão médio: {df['Pulmão (armário)'].mean():.1f}")
+    print(f"Total médio:  {df['Total na Loja'].mean():.1f}")
+
+    fontes = df["Fonte VM"].value_counts()
+    print(f"\nFontes:")
+    for f, c in fontes.items():
+        print(f"  {f}: {c} SKUs")
+
+    # Top 10
+    print(f"\nTop 10 — Maior Total na Loja:")
+    top = df.head(10)
+    for _, r in top.iterrows():
+        print(f"  {r['SKU']:<30} VM={r['VM (prateleira)']:>3}  "
+              f"Pulm={r['Pulmão (armário)']:>3}  Total={r['Total na Loja']:>3}  "
+              f"(σ={r['σ Diário']:.2f})")
+
+
+if __name__ == "__main__":
+    main()

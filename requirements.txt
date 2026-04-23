@@ -1,0 +1,10 @@
+streamlit
+pandas
+openpyxl
+pyyaml
+ruamel.yaml
+plotly
+gspread
+google-auth
+google-auth-oauthlib
+streamlit-authenticator

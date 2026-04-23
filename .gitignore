@@ -1,0 +1,41 @@
+# Credenciais — NUNCA commitar
+.streamlit/secrets.toml
+.streamlit/*.json
+
+# Dados locais — NUNCA commitar (dados do cliente)
+data/*.xlsx
+data/*.xls
+data/*.csv
+data/_temp.*
+
+# Python
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ambientes virtuais
+venv/
+.venv/
+env/
+.env/
+
+# Variáveis de ambiente
+.env
+.env.local
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+
+# Claude Code e MCP
+.claude/
+.mcp.json
+

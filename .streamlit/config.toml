@@ -1,0 +1,8 @@
+[theme]
+primaryColor = "#1976D2"
+
+[ui]
+hideTopBar = false
+
+[server]
+headless = true
