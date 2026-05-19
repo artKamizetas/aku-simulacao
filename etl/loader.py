@@ -1,17 +1,18 @@
 """
 loader.py — Leitura e Validação da Exportação Bling
 
-Suporta duas fontes de dados:
-  - Google Sheets (produção/Streamlit Cloud): quando st.secrets["sheet_id"] está configurado
-  - Excel local (desenvolvimento): passa o caminho do arquivo normalmente
+Fontes de dados suportadas (selecionadas por st.secrets["fonte_dados"]):
+  - "supabase" (DEFAULT, produção): lê o Postgres do Supabase via SQLAlchemy
+  - "sheets" (transição/rollback): lê o Google Sheets via gspread — LEGADO
+  - Excel local (desenvolvimento): fallback quando nada configurado
 
-A escolha é automática: se st.secrets tiver "sheet_id", usa Sheets; caso contrário, usa Excel.
-Nenhuma página ou módulo ETL precisa ser alterado — a interface é idêntica.
+Nenhuma página ou módulo ETL precisa ser alterado — a interface é idêntica
+(dict de DataFrames com as chaves/colunas do SCHEMA).
 
 Uso:
     from etl.loader import carregar_dados
-    dados = carregar_dados("data/Integração Bling ERP.xlsx")   # Excel local
-    dados = carregar_dados()                                    # Sheets (se configurado)
+    dados = carregar_dados()                                    # fonte conforme secrets
+    dados = carregar_dados("data/Integração Bling ERP.xlsx")    # força Excel local
     dados["pedidos"]  # DataFrame dos pedidos
 """
 
@@ -33,6 +34,30 @@ SCHEMA = {
     "Lojas": ["ID", "descricao", "Situacao"],
     "Situações": ["ID", "descricao"],
     "Depósitos": ["ID", "descricao"],
+}
+
+
+# Mapa: aba do SCHEMA → nome da tabela no Supabase (schema 'public').
+# PREENCHER/CONFIRMAR com `python scripts/inspecionar_supabase.py` (Fase 0).
+# Os valores abaixo são um palpite snake_case sem acento — ajustar conforme
+# os nomes reais criados pela pipeline Bling→Supabase.
+TABELAS_SUPABASE = {
+    "Pedidos": "pedidos",
+    "Itens": "itens",
+    "Produtos": "produtos",
+    "EstoqueV3": "estoque_v3",
+    "Produtos_detalhes": "produtos_detalhes",
+    "Vendedores": "vendedores",
+    "Lojas": "lojas",
+    "Situações": "situacoes",
+    "Depósitos": "depositos",
+}
+
+# Renomeio opcional de colunas: aba → {coluna_no_supabase: coluna_do_SCHEMA}.
+# Vazio = colunas do Supabase já batem com o SCHEMA. Preencher se a pipeline
+# usar nomes diferentes (descoberto na Fase 0 / paridade Fase 2).
+COLUNAS_SUPABASE = {
+    # "Pedidos": {"loja_id": "Loja ID", "total_venda": "Total Venda"},
 }
 
 
@@ -134,13 +159,77 @@ def _ler_sheets(sheet_id: str) -> dict:
     return todas_abas
 
 
-def carregar_dados(caminho_excel: str = None) -> dict:
+def _fonte() -> str:
+    """Fonte de dados ativa: 'supabase' (default), 'sheets' ou 'excel'."""
+    try:
+        f = st.secrets.get("fonte_dados")
+        if f:
+            return str(f).strip().lower()
+        # Compatibilidade: se só houver sheet_id, mantém Sheets
+        if st.secrets.get("sheet_id"):
+            return "sheets"
+    except Exception:
+        pass
+    return "excel"
+
+
+@st.cache_resource
+def _conn_supabase():
+    """Engine SQLAlchemy do Supabase (cacheada por sessão)."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import URL
+
+    cfg = st.secrets["supabase"]
+    url = URL.create(
+        "postgresql+psycopg2",
+        username=cfg["user"],
+        password=cfg["password"],
+        host=cfg["host"],
+        port=int(cfg.get("port", 5432)),
+        database=cfg["dbname"],
+    )
+    return create_engine(url, pool_pre_ping=True)
+
+
+@st.cache_data(ttl=3600)
+def _ler_supabase() -> dict:
+    """
+    Lê cada tabela do Supabase e retorna {nome_aba_SCHEMA: DataFrame}.
+    Cacheado por 1 hora. Tabelas via TABELAS_SUPABASE; colunas renomeadas
+    via COLUNAS_SUPABASE quando necessário.
+    """
+    from sqlalchemy import text
+
+    engine = _conn_supabase()
+    schema = st.secrets["supabase"].get("schema", "public")
+
+    todas_abas = {}
+    with engine.connect() as conn:
+        for aba, tabela in TABELAS_SUPABASE.items():
+            if not tabela:
+                continue  # aba não mapeada — validação acusa aba ausente
+            query = text(f'SELECT * FROM "{schema}"."{tabela}"')
+            df = pd.read_sql_query(query, conn)
+
+            rename = COLUNAS_SUPABASE.get(aba)
+            if rename:
+                df = df.rename(columns=rename)
+
+            # Paridade com _ler_sheets: vazio → pd.NA p/ dropna() funcionar
+            todas_abas[aba] = df.replace("", pd.NA)
+
+    return todas_abas
+
+
+def carregar_dados(caminho_excel: str = None, fonte: str = None) -> dict:
     """
     Lê os dados do Bling e retorna um dicionário de DataFrames.
 
-    Fonte de dados (escolha automática):
-      - Google Sheets: quando st.secrets["sheet_id"] estiver configurado.
-      - Excel local:   caso contrário, usa caminho_excel.
+    Fonte de dados (escolha automática via st.secrets["fonte_dados"]):
+      - "supabase": Postgres do Supabase (default em produção).
+      - "sheets":   Google Sheets (legado/rollback).
+      - "excel":    arquivo local (desenvolvimento).
+    O parâmetro `fonte` força a fonte (usado por scripts de paridade/teste).
 
     Retorna:
         {
@@ -163,7 +252,14 @@ def carregar_dados(caminho_excel: str = None) -> dict:
     # ----------------------------------------------------------------
     # Leitura da fonte de dados
     # ----------------------------------------------------------------
-    if _usar_sheets():
+    fonte = (fonte or _fonte()).strip().lower()
+    if fonte == "supabase":
+        try:
+            todas_abas = _ler_supabase()
+        except Exception as e:
+            st.error(f"❌ Erro ao conectar ao Supabase: {e}")
+            return {"validacao": {"ok": False, "erros": [f"Erro ao ler Supabase: {e}"], "avisos": []}}
+    elif fonte == "sheets":
         try:
             sheet_id = st.secrets["sheet_id"]
             todas_abas = _ler_sheets(sheet_id)

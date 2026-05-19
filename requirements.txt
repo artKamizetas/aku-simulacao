@@ -4,6 +4,8 @@ openpyxl
 pyyaml
 ruamel.yaml
 plotly
+sqlalchemy
+psycopg2-binary
 gspread
 google-auth
 google-auth-oauthlib
