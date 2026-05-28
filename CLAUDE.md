@@ -2,7 +2,7 @@
 
 ## O que é este projeto
 Dashboard Streamlit que substitui o fluxo Google Apps Script + Looker Studio da Art Kamizetas.
-Lê dados do **Google Sheets** integrado com o Bling ERP, processa via pandas e exibe análises de estoque, PCP e vendas.
+Lê dados do **Supabase** (Postgres espelhado da pipeline Bling→Supabase, mantida por outra equipe), processa via pandas e exibe análises de estoque, PCP e vendas.
 Empresa: Art Kamizetas — lojas em Natal e Mossoró (RN).
 
 ## Como rodar
@@ -14,7 +14,7 @@ venv\Scripts\activate
 streamlit run app.py
 ```
 
-**Origem dos dados:** Google Sheets (configurado em `st.secrets["sheet_id"]`). Não há dependência de arquivo Excel local.
+**Origem dos dados:** Supabase via PostgREST (`postgrest`), credenciais em `st.secrets["supabase"]` (`url` + `service_key`).
 
 ## Arquitetura
 
@@ -24,7 +24,8 @@ config.yaml                 # Todas as configurações (metas, IDs, janelas de t
 auth.py                     # Autenticação Streamlit (role-based access control)
 data/                       # Dados locais (Parametros_VM.xlsx, não sincronizado com Bling)
 etl/
-  loader.py                 # Lê Google Sheets (via secrets) e valida → retorna dict de DataFrames
+  loader.py                 # Lê Supabase (via PostgREST) e valida → retorna dict de DataFrames
+                            # Mapas TABELAS_SUPABASE / COLUNAS_SUPABASE convertem nomes para o SCHEMA
   daily.py                  # Lógica de Comercial / Metas diárias
   logistica.py              # Lógica de Reposição de Loja
   fabrica.py                # Lógica de PCP / Planejamento de Produção
@@ -40,12 +41,11 @@ pages/
 ```
 
 ## Fluxo de dados padrão
-1. `loader.py::carregar_dados()` lê **Google Sheets** (via `st.secrets["sheet_id"]`) e retorna um `dict` de DataFrames
-   - Se Google Sheets não estiver disponível, tenta carregar do Excel local como fallback (para desenvolvimento)
-2. Páginas importam funções dos módulos `etl/` e passam os DataFrames
-3. Configurações são sempre lidas do `config.yaml` via `yaml.safe_load()` ou via `ruamel.yaml` (para preservar comentários)
-4. **Nunca** leia o Excel diretamente nas páginas — sempre passe pelo `loader.py()`
-5. Em produção: dados vêm 100% do Google Sheets; arquivo Excel local não é necessário
+1. `loader.py::carregar_dados()` lê **Supabase** via PostgREST e retorna um `dict` de DataFrames com chaves/colunas no formato do `SCHEMA`
+2. `TABELAS_SUPABASE` mapeia aba do SCHEMA → tabela real do Supabase; `COLUNAS_SUPABASE` renomeia colunas (IDs usados são os `*_bling`, não os surrogate `id` UUID)
+3. Páginas importam funções dos módulos `etl/` e passam os DataFrames
+4. Configurações são sempre lidas do `config.yaml` via `yaml.safe_load()` ou via `ruamel.yaml` (para preservar comentários)
+5. **Nunca** leia tabelas Supabase diretamente nas páginas — sempre passe pelo `loader.py()`
 
 ## DataFrames disponíveis após `carregar_dados()`
 - `dados["pedidos"]` — Pedidos (Loja ID, Data, Total Venda, id_situacao)
@@ -71,7 +71,8 @@ pages/
 
 ## Convenções de código
 - Pandas para toda manipulação de dados
-- `st.cache_data` nos carregamentos pesados (leitura do Google Sheets via `loader.py`)
+- `st.cache_data` nos carregamentos pesados (leitura do Supabase via `loader.py`, TTL=3600)
+- **IDs entre tabelas Supabase**: sempre usar `limpar_id()` ANTES de comparar/joinar — postgrest devolve colunas int com NULL como `float64`, e `astype(str)` direto gera `'123.0'` que quebra merges com IDs vindos como int64 puros
 - Configurações sempre de `config.yaml`, nunca hardcoded nas páginas
 - **Autenticação:** `auth.py` com role-based access (admin, user) via `st.secrets["auth_config"]`
 - **Configuração dinâmica:** página `5_Configuracoes.py` permite salvar alterações em `config.yaml` via UI (admin only)
@@ -106,7 +107,7 @@ CSV template para sobrescrever parâmetros globais por SKU:
 ### Aba 3: Sistema
 Informações do sistema:
 - Versões (Python, Streamlit, Pandas)
-- Fonte de dados: Google Sheets — Bling ERP (não Excel local)
+- Fonte de dados: Supabase (Bling ERP via pipeline externa)
 - Data de última modificação do `config.yaml`
 - Botão: Forçar recarga de cache
 - Botão: Backup do `config.yaml` (download)
@@ -128,19 +129,30 @@ pandas
 openpyxl
 pyyaml
 ruamel.yaml
-gspread
-oauth2client
+plotly
+postgrest
 streamlit-authenticator
 ```
+
+`openpyxl` continua porque `data/Parametros_VM.xlsx` é local (carregado por `vm_dinamico.carregar_parametros_vm`).
 
 ---
 
 ## Secrets esperados (streamlit/secrets.toml)
 ```toml
-# Google Sheets
-sheet_id = "SEU_SHEET_ID_AQUI"
+# Supabase (Project Settings → API)
+[supabase]
+url = "https://<PROJECT_REF>.supabase.co"
+service_key = "<SERVICE_ROLE_KEY>"
+schema = "public"
 
 # Autenticação
 [auth_config]
-credentials = { usernames = { admin = { password = "HASH_BCrypt", role = "admin" }, ... } }
+cookie_name = "bling_dashboard_auth"
+cookie_key = "<COOKIE_SECRET>"
+cookie_expiry_days = 7
+[auth_config.credentials.usernames.admin]
+name = "Admin"
+password = "<BCRYPT_HASH>"
+role = "admin"
 ```

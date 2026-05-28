@@ -1,24 +1,19 @@
 """
-loader.py — Leitura e Validação da Exportação Bling
+loader.py — Leitura e Validação dos Dados do Bling (via Supabase).
 
-Fontes de dados suportadas (selecionadas por st.secrets["fonte_dados"]):
-  - "supabase" (DEFAULT, produção): lê o Postgres do Supabase via SQLAlchemy
-  - "sheets" (transição/rollback): lê o Google Sheets via gspread — LEGADO
-  - Excel local (desenvolvimento): fallback quando nada configurado
-
-Nenhuma página ou módulo ETL precisa ser alterado — a interface é idêntica
-(dict de DataFrames com as chaves/colunas do SCHEMA).
+Lê o Postgres do Supabase via PostgREST (`postgrest`) usando SUPABASE_URL +
+SERVICE_KEY de st.secrets["supabase"]. Tabelas mapeadas em TABELAS_SUPABASE e
+colunas renomeadas via COLUNAS_SUPABASE para casar com o SCHEMA esperado pelas
+páginas e módulos ETL.
 
 Uso:
     from etl.loader import carregar_dados
-    dados = carregar_dados()                                    # fonte conforme secrets
-    dados = carregar_dados("data/Integração Bling ERP.xlsx")    # força Excel local
+    dados = carregar_dados()
     dados["pedidos"]  # DataFrame dos pedidos
 """
 
 import pandas as pd
 import streamlit as st
-from pathlib import Path
 
 
 # Mapa de abas esperadas e suas colunas obrigatórias
@@ -38,26 +33,45 @@ SCHEMA = {
 
 
 # Mapa: aba do SCHEMA → nome da tabela no Supabase (schema 'public').
-# PREENCHER/CONFIRMAR com `python scripts/inspecionar_supabase.py` (Fase 0).
-# Os valores abaixo são um palpite snake_case sem acento — ajustar conforme
-# os nomes reais criados pela pipeline Bling→Supabase.
+# Confirmado via scripts/inspecionar_supabase.py (Fase 0).
 TABELAS_SUPABASE = {
     "Pedidos": "pedidos",
     "Itens": "itens",
     "Produtos": "produtos",
-    "EstoqueV3": "estoque_v3",
-    "Produtos_detalhes": "produtos_detalhes",
+    "EstoqueV3": "estoque",
+    "Produtos_detalhes": "produto_detalhes",
     "Vendedores": "vendedores",
     "Lojas": "lojas",
-    "Situações": "situacoes",
+    "Situações": "situacoes_vendas",
     "Depósitos": "depositos",
 }
 
-# Renomeio opcional de colunas: aba → {coluna_no_supabase: coluna_do_SCHEMA}.
-# Vazio = colunas do Supabase já batem com o SCHEMA. Preencher se a pipeline
-# usar nomes diferentes (descoberto na Fase 0 / paridade Fase 2).
+# Renomeio de colunas: aba → {coluna_no_supabase: coluna_do_SCHEMA}.
+# IDs usados são os do Bling (*_bling), não o `id` surrogate do Supabase —
+# config e joins entre tabelas usam IDs Bling. Confirmado na Fase 0.
 COLUNAS_SUPABASE = {
-    # "Pedidos": {"loja_id": "Loja ID", "total_venda": "Total Venda"},
+    "Pedidos": {
+        "id_bling": "ID", "numero": "Pedido", "id_situacao_bling": "id_situacao",
+        "id_vendedor_bling": "Vendedor", "id_loja_bling": "Loja ID",
+        "data": "Data", "valor_total": "Total Venda", "cliente": "Cliente",
+        "desconto": "Desconto",  # usado por daily.py (não está no SCHEMA)
+    },
+    "Itens": {
+        "id_pedido_bling": "ID_pedido", "id_produto_bling": "ID_produto",
+        "quantidade": "Quantidade", "valor_unidade": "Valor Unidade",
+        "desconto_item": "Desconto Item",
+    },  # 'Data' não existe em itens — enriquecida via join em Pedidos
+    "Produtos": {"id_bling": "ID", "descricao": "Descricao"},
+    "EstoqueV3": {"id_deposito_bling": "ID_deposito", "id_produto_bling": "ID_produto"},
+    "Produtos_detalhes": {
+        "id_produto_bling": "ID_produto", "codigo": "Codigo",
+        "super_categoria": "Super_categoria", "linha": "Grupo",
+        "tamanho": "Tamanho", "marca": "Marca_sku",
+    },
+    "Vendedores": {"id_bling": "ID"},
+    "Lojas": {"id_bling": "ID", "situcao": "Situacao"},  # 'situcao' = typo na origem
+    "Situações": {"id_bling": "ID"},
+    "Depósitos": {"id_bling": "ID"},
 }
 
 
@@ -113,123 +127,107 @@ def converter_data_flexivel(valor):
     except Exception:
         return pd.NaT
 
-
-def _usar_sheets() -> bool:
-    """Retorna True se st.secrets tem sheet_id configurado (modo Streamlit Cloud)."""
-    try:
-        return bool(st.secrets.get("sheet_id"))
-    except Exception:
-        return False
-
-
-@st.cache_data(ttl=3600)
-def _ler_sheets(sheet_id: str) -> dict:
-    """
-    Lê todas as abas do Google Sheets e retorna um dict {nome_aba: DataFrame}.
-    Cacheado por 1 hora para minimizar chamadas à API do Google.
-
-    Requer em st.secrets:
-        sheet_id = "ID_DA_PLANILHA"
-        [gcp_service_account]
-        type = "service_account"
-        ... (JSON completo da Service Account)
-    """
-    import gspread
-
-    creds_dict = dict(st.secrets["gcp_service_account"])
-    gc = gspread.service_account_from_dict(creds_dict)
-    sh = gc.open_by_key(sheet_id)
-
-    todas_abas = {}
-    for ws in sh.worksheets():
-        values = ws.get_all_values()
-        if len(values) > 1:
-            # Primeira linha = cabeçalho; demais = dados
-            cabecalho = [str(c).strip() for c in values[0]]
-            df = pd.DataFrame(values[1:], columns=cabecalho)
-        elif len(values) == 1:
-            cabecalho = [str(c).strip() for c in values[0]]
-            df = pd.DataFrame(columns=cabecalho)
-        else:
-            df = pd.DataFrame()
-
-        # Strings vazias → pd.NA para que dropna() funcione corretamente
-        todas_abas[ws.title] = df.replace("", pd.NA)
-
-    return todas_abas
-
-
-def _fonte() -> str:
-    """Fonte de dados ativa: 'supabase' (default), 'sheets' ou 'excel'."""
-    try:
-        f = st.secrets.get("fonte_dados")
-        if f:
-            return str(f).strip().lower()
-        # Compatibilidade: se só houver sheet_id, mantém Sheets
-        if st.secrets.get("sheet_id"):
-            return "sheets"
-    except Exception:
-        pass
-    return "excel"
+_PAGE_SIZE = 1000  # limite default do PostgREST por request
 
 
 @st.cache_resource
 def _conn_supabase():
-    """Engine SQLAlchemy do Supabase (cacheada por sessão)."""
-    from sqlalchemy import create_engine
-    from sqlalchemy.engine import URL
+    """
+    Cliente PostgREST (cacheado por sessão). Usa SERVICE_KEY (ignora RLS).
+    `postgrest` é o subconjunto da Data API do supabase-py — mesmas
+    credenciais (SUPABASE_URL + SERVICE_KEY), sem deps que exigem compilador.
+    """
+    from postgrest import SyncPostgrestClient
 
     cfg = st.secrets["supabase"]
-    url = URL.create(
-        "postgresql+psycopg2",
-        username=cfg["user"],
-        password=cfg["password"],
-        host=cfg["host"],
-        port=int(cfg.get("port", 5432)),
-        database=cfg["dbname"],
+    key = cfg["service_key"]
+    schema = cfg.get("schema", "public")
+    return SyncPostgrestClient(
+        f"{cfg['url'].rstrip('/')}/rest/v1",
+        schema=schema,
+        headers={"apikey": key, "Authorization": f"Bearer {key}"},
     )
-    return create_engine(url, pool_pre_ping=True)
+
+
+def _ler_tabela(client, tabela: str) -> pd.DataFrame:
+    """Lê tabela inteira paginando em blocos de _PAGE_SIZE (limite PostgREST)."""
+    linhas = []
+    inicio = 0
+    while True:
+        resp = (
+            client.from_(tabela)
+            .select("*")
+            .range(inicio, inicio + _PAGE_SIZE - 1)
+            .execute()
+        )
+        lote = resp.data or []
+        linhas.extend(lote)
+        if len(lote) < _PAGE_SIZE:
+            break
+        inicio += _PAGE_SIZE
+    return pd.DataFrame(linhas)
 
 
 @st.cache_data(ttl=3600)
 def _ler_supabase() -> dict:
     """
-    Lê cada tabela do Supabase e retorna {nome_aba_SCHEMA: DataFrame}.
-    Cacheado por 1 hora. Tabelas via TABELAS_SUPABASE; colunas renomeadas
-    via COLUNAS_SUPABASE quando necessário.
+    Lê cada tabela do Supabase (via supabase-py) e retorna
+    {nome_aba_SCHEMA: DataFrame}. Cacheado por 1 hora. Tabelas via
+    TABELAS_SUPABASE; colunas renomeadas via COLUNAS_SUPABASE quando necessário.
     """
-    from sqlalchemy import text
-
-    engine = _conn_supabase()
-    schema = st.secrets["supabase"].get("schema", "public")
+    client = _conn_supabase()
 
     todas_abas = {}
-    with engine.connect() as conn:
-        for aba, tabela in TABELAS_SUPABASE.items():
-            if not tabela:
-                continue  # aba não mapeada — validação acusa aba ausente
-            query = text(f'SELECT * FROM "{schema}"."{tabela}"')
-            df = pd.read_sql_query(query, conn)
+    for aba, tabela in TABELAS_SUPABASE.items():
+        if not tabela:
+            continue  # aba não mapeada — validação acusa aba ausente
+        df = _ler_tabela(client, tabela)
 
-            rename = COLUNAS_SUPABASE.get(aba)
-            if rename:
-                df = df.rename(columns=rename)
+        rename = COLUNAS_SUPABASE.get(aba)
+        if rename:
+            # Evita colisão: Supabase tem colunas surrogate (ex: 'id_situacao')
+            # com o mesmo nome do alvo do rename de uma coluna *_bling.
+            # Dropa o surrogate colidente antes de renomear.
+            alvos = set(rename.values())
+            fontes = set(rename.keys())
+            colidem = [c for c in df.columns if c in alvos and c not in fontes]
+            if colidem:
+                df = df.drop(columns=colidem)
+            df = df.rename(columns=rename)
 
-            # Paridade com _ler_sheets: vazio → pd.NA p/ dropna() funcionar
-            todas_abas[aba] = df.replace("", pd.NA)
+        # Strings vazias → pd.NA p/ dropna() funcionar corretamente
+        todas_abas[aba] = df.replace("", pd.NA)
+
+    # ----------------------------------------------------------------
+    # Ajustes de schema (diferenças estruturais Supabase × SCHEMA)
+    # ----------------------------------------------------------------
+    ped = todas_abas.get("Pedidos")
+    itn = todas_abas.get("Itens")
+
+    # 'Total Produtos' não existe em pedidos no Supabase; só é tipada no
+    # loader e não é usada adiante → espelha 'Total Venda'.
+    if ped is not None and "Total Produtos" not in ped.columns and "Total Venda" in ped.columns:
+        ped["Total Produtos"] = ped["Total Venda"]
+
+    # 'itens' do Supabase não tem data do pedido — enriquecer com Pedidos.Data
+    # (usado em planejamento/logística p/ filtro por período).
+    # IMPORTANTE: postgrest devolve id_pedido_bling como float (NULL → NaN força
+    # float64); astype(str) geraria '...0' e o merge falharia. Usa limpar_id
+    # dos dois lados para normalizar a chave.
+    if itn is not None and ped is not None and "Data" not in itn.columns:
+        chave = ped[["ID", "Data"]].copy()
+        chave["_k"] = chave["ID"].apply(limpar_id)
+        itn = itn.copy()
+        itn["_k"] = itn["ID_pedido"].apply(limpar_id)
+        itn = itn.merge(chave[["_k", "Data"]], on="_k", how="left").drop(columns="_k")
+        todas_abas["Itens"] = itn
 
     return todas_abas
 
 
-def carregar_dados(caminho_excel: str = None, fonte: str = None) -> dict:
+def carregar_dados() -> dict:
     """
-    Lê os dados do Bling e retorna um dicionário de DataFrames.
-
-    Fonte de dados (escolha automática via st.secrets["fonte_dados"]):
-      - "supabase": Postgres do Supabase (default em produção).
-      - "sheets":   Google Sheets (legado/rollback).
-      - "excel":    arquivo local (desenvolvimento).
-    O parâmetro `fonte` força a fonte (usado por scripts de paridade/teste).
+    Lê os dados do Bling do Supabase e retorna um dicionário de DataFrames.
 
     Retorna:
         {
@@ -249,31 +247,11 @@ def carregar_dados(caminho_excel: str = None, fonte: str = None) -> dict:
     erros = []
     avisos = []
 
-    # ----------------------------------------------------------------
-    # Leitura da fonte de dados
-    # ----------------------------------------------------------------
-    fonte = (fonte or _fonte()).strip().lower()
-    if fonte == "supabase":
-        try:
-            todas_abas = _ler_supabase()
-        except Exception as e:
-            st.error(f"❌ Erro ao conectar ao Supabase: {e}")
-            return {"validacao": {"ok": False, "erros": [f"Erro ao ler Supabase: {e}"], "avisos": []}}
-    elif fonte == "sheets":
-        try:
-            sheet_id = st.secrets["sheet_id"]
-            todas_abas = _ler_sheets(sheet_id)
-        except Exception as e:
-            st.error(f"❌ Erro ao conectar ao Google Sheets: {e}")
-            return {"validacao": {"ok": False, "erros": [f"Erro ao ler Google Sheets: {e}"], "avisos": []}}
-    else:
-        caminho = Path(caminho_excel) if caminho_excel else Path("data/Integração Bling ERP.xlsx")
-        if not caminho.exists():
-            return {"validacao": {"ok": False, "erros": [f"Arquivo não encontrado: {caminho}"], "avisos": []}}
-        try:
-            todas_abas = pd.read_excel(caminho, sheet_name=None, engine="openpyxl")
-        except Exception as e:
-            return {"validacao": {"ok": False, "erros": [f"Erro ao ler Excel: {e}"], "avisos": []}}
+    try:
+        todas_abas = _ler_supabase()
+    except Exception as e:
+        st.error(f"❌ Erro ao conectar ao Supabase: {e}")
+        return {"validacao": {"ok": False, "erros": [f"Erro ao ler Supabase: {e}"], "avisos": []}}
 
     # ----------------------------------------------------------------
     # Validação: presença de abas e colunas obrigatórias
@@ -356,6 +334,9 @@ def carregar_dados(caminho_excel: str = None, fonte: str = None) -> dict:
     df = todas_abas["Produtos_detalhes"].copy()
     df = df.dropna(subset=["ID_produto"])
     df["ID_produto"] = df["ID_produto"].apply(limpar_id)
+    # Supabase pode ter múltiplas linhas de detalhe por produto; o restante do
+    # código assume 1:1 (set_index/to_dict). Mantém o último registro.
+    df = df.drop_duplicates(subset=["ID_produto"], keep="last")
     # Força todas as colunas de categorização para string (evita tipos misturados)
     for col in ["categoria", "Super_categoria", "Grupo", "Tamanho", "Marca_sku"]:
         if col in df.columns:
