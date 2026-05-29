@@ -17,7 +17,6 @@ from pathlib import Path
 from etl.loader import carregar_dados
 
 
-@st.cache_data
 def _carregar():
     caminho_config = Path(__file__).parent.parent / "config.yaml"
     with open(caminho_config, "r", encoding="utf-8") as f:

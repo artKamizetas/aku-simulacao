@@ -51,7 +51,6 @@ pages/
 - `dados["pedidos"]` — Pedidos (Loja ID, Data, Total Venda, id_situacao)
 - `dados["itens"]` — Itens dos pedidos (ID_pedido, ID_produto, Quantidade)
 - `dados["produtos"]` — Produtos ATIVOS (situacao == "A")
-- `dados["produtos_todos"]` — Todos os produtos (incluindo inativos)
 - `dados["estoque"]` — Saldo físico por depósito (ID_deposito, ID_produto, saldoFisico)
 - `dados["detalhes"]` — Detalhes do produto (categoria, Super_categoria, Grupo, Tamanho)
 - `dados["vendedores"]`, `dados["lojas"]`, `dados["situacoes"]`, `dados["depositos"]`
@@ -65,7 +64,7 @@ pages/
 ## Regras de negócio críticas
 - **Loja ID ≠ Depósito ID**: loja aparece em Pedidos, depósito em EstoqueV3
 - **SKU format**: código alfanumérico sem padrão fixo, mas normalmente `CATEGORIA-TAMANHO`
-- **Produtos**: só trabalhar com `dados["produtos"]` (ativos). Usar `dados["produtos_todos"]` apenas para referência histórica
+- **Produtos**: só trabalhar com `dados["produtos"]` (ativos)
 - **IDs como string**: IDs do Bling são sempre tratados como string após `limpar_id()` — nunca compare como int
 - **Datas**: coluna `Data` já convertida para datetime no loader
 

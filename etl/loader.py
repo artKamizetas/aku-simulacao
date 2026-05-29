@@ -12,6 +12,8 @@ Uso:
     dados["pedidos"]  # DataFrame dos pedidos
 """
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pandas as pd
 import streamlit as st
 
@@ -136,16 +138,33 @@ def _conn_supabase():
     Cliente PostgREST (cacheado por sessão). Usa SERVICE_KEY (ignora RLS).
     `postgrest` é o subconjunto da Data API do supabase-py — mesmas
     credenciais (SUPABASE_URL + SERVICE_KEY), sem deps que exigem compilador.
+
+    HTTP/1.1 forçado (http2=False) — HTTP/2 multiplexa streams em 1 conexão TCP
+    e tem race em uso concorrente por threads (ConnectionTerminated PROTOCOL_ERROR).
+    HTTP/1.1 usa pool de conexões separadas, totalmente thread-safe.
     """
+    import httpx
     from postgrest import SyncPostgrestClient
 
     cfg = st.secrets["supabase"]
     key = cfg["service_key"]
     schema = cfg.get("schema", "public")
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    http_client = httpx.Client(
+        http2=False,
+        headers=headers,
+        limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+    )
     return SyncPostgrestClient(
         f"{cfg['url'].rstrip('/')}/rest/v1",
         schema=schema,
-        headers={"apikey": key, "Authorization": f"Bearer {key}"},
+        headers=headers,
+        http_client=http_client,
     )
 
 
@@ -168,35 +187,50 @@ def _ler_tabela(client, tabela: str) -> pd.DataFrame:
     return pd.DataFrame(linhas)
 
 
+def _ler_e_renomear(client, aba: str, tabela: str):
+    """Lê uma tabela e aplica rename — unidade paralelizável por _ler_supabase."""
+    if not tabela:
+        return aba, None  # aba não mapeada — validação acusa aba ausente
+    df = _ler_tabela(client, tabela)
+
+    rename = COLUNAS_SUPABASE.get(aba)
+    if rename:
+        # Evita colisão: Supabase tem colunas surrogate (ex: 'id_situacao')
+        # com o mesmo nome do alvo do rename de uma coluna *_bling.
+        # Dropa o surrogate colidente antes de renomear.
+        alvos = set(rename.values())
+        fontes = set(rename.keys())
+        colidem = [c for c in df.columns if c in alvos and c not in fontes]
+        if colidem:
+            df = df.drop(columns=colidem)
+        df = df.rename(columns=rename)
+
+    # Strings vazias → pd.NA p/ dropna() funcionar corretamente
+    return aba, df.replace("", pd.NA)
+
+
 @st.cache_data(ttl=3600)
 def _ler_supabase() -> dict:
     """
     Lê cada tabela do Supabase (via supabase-py) e retorna
     {nome_aba_SCHEMA: DataFrame}. Cacheado por 1 hora. Tabelas via
     TABELAS_SUPABASE; colunas renomeadas via COLUNAS_SUPABASE quando necessário.
+
+    9 tabelas lidas em paralelo (ThreadPoolExecutor). SyncPostgrestClient usa
+    httpx.Client (thread-safe); cliente cacheado por sessão em _conn_supabase.
     """
     client = _conn_supabase()
 
     todas_abas = {}
-    for aba, tabela in TABELAS_SUPABASE.items():
-        if not tabela:
-            continue  # aba não mapeada — validação acusa aba ausente
-        df = _ler_tabela(client, tabela)
-
-        rename = COLUNAS_SUPABASE.get(aba)
-        if rename:
-            # Evita colisão: Supabase tem colunas surrogate (ex: 'id_situacao')
-            # com o mesmo nome do alvo do rename de uma coluna *_bling.
-            # Dropa o surrogate colidente antes de renomear.
-            alvos = set(rename.values())
-            fontes = set(rename.keys())
-            colidem = [c for c in df.columns if c in alvos and c not in fontes]
-            if colidem:
-                df = df.drop(columns=colidem)
-            df = df.rename(columns=rename)
-
-        # Strings vazias → pd.NA p/ dropna() funcionar corretamente
-        todas_abas[aba] = df.replace("", pd.NA)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futuros = [
+            pool.submit(_ler_e_renomear, client, aba, tabela)
+            for aba, tabela in TABELAS_SUPABASE.items()
+        ]
+        for f in futuros:
+            aba, df = f.result()
+            if df is not None:
+                todas_abas[aba] = df
 
     # ----------------------------------------------------------------
     # Ajustes de schema (diferenças estruturais Supabase × SCHEMA)
@@ -225,6 +259,7 @@ def _ler_supabase() -> dict:
     return todas_abas
 
 
+@st.cache_data(ttl=3600)
 def carregar_dados() -> dict:
     """
     Lê os dados do Bling do Supabase e retorna um dicionário de DataFrames.
@@ -234,7 +269,6 @@ def carregar_dados() -> dict:
             "pedidos":       DataFrame,
             "itens":         DataFrame,
             "produtos":      DataFrame,   ← apenas ativos (situacao == "A")
-            "produtos_todos": DataFrame,  ← todos os produtos
             "estoque":       DataFrame,
             "detalhes":      DataFrame,
             "vendedores":    DataFrame,
@@ -320,7 +354,6 @@ def carregar_dados() -> dict:
     ).fillna(0)
     # Filtra apenas ativos (situacao = 'A'). Remove Inativos, Excluídos e sem situação.
     dados["produtos"] = df[df["situacao"] == "A"].copy()
-    dados["produtos_todos"] = df  # Versão completa para referência histórica
 
     # --- Estoque ---
     df = todas_abas["EstoqueV3"].copy()
