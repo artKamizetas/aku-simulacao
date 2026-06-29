@@ -49,8 +49,7 @@ def main():
     with open(caminho_config, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
-    caminho_excel = base / "data" / config["fonte"]["arquivo"]
-    dados = carregar_dados(str(caminho_excel))
+    dados = carregar_dados()
 
     caminho_params = base / "data" / "Parametros_VM.xlsx"
     params = carregar_parametros_vm(str(caminho_params))

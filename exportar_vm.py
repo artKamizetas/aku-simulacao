@@ -28,8 +28,7 @@ def main():
 
     # Carrega dados
     print("Carregando dados Bling...", end=" ", flush=True)
-    caminho_excel = BASE / "data" / config["fonte"]["arquivo"]
-    dados = carregar_dados(str(caminho_excel))
+    dados = carregar_dados()
     print(f"OK ({time.time()-t0:.1f}s)")
 
     if not dados["validacao"]["ok"]:

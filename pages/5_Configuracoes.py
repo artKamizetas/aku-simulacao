@@ -412,7 +412,7 @@ with tab3:
 
     with col2:
         st.markdown("#### 📊 Fonte de Dados")
-        st.write("**Fonte:** Google Sheets — Bling ERP")
+        st.write("**Fonte:** Supabase — Bling ERP")
         st.write("**Cache:** Recarregado a cada 1 hora (ou ao clicar 🔄)")
 
         try:

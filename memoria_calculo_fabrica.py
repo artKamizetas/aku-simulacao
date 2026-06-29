@@ -43,8 +43,7 @@ def main():
     with open(caminho_config, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
-    caminho_excel = Path(__file__).parent / "data" / config["fonte"]["arquivo"]
-    dados = carregar_dados(str(caminho_excel))
+    dados = carregar_dados()
 
     produtos = dados["produtos"]
 
