@@ -307,7 +307,7 @@ with tab_geral:
                         return "background-color: #FFF9C4"
                 return ""
 
-            styled = df_detalhe.style.applymap(_cor_estoque, subset=["Estoque Final"])
+            styled = df_detalhe.style.map(_cor_estoque, subset=["Estoque Final"])
             st.dataframe(styled, use_container_width=True, hide_index=True)
 
 # =================================================================

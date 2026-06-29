@@ -158,7 +158,7 @@ def _verde_sugestao(val):
         return "background-color: #E8F5E9"
     return ""
 
-styled = df_exibir.style.applymap(_verde_sugestao, subset=["Sugestão Qtd"])
+styled = df_exibir.style.map(_verde_sugestao, subset=["Sugestão Qtd"])
 
 st.dataframe(styled, use_container_width=True, hide_index=True)
 
