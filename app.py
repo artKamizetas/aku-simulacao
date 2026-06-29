@@ -9,7 +9,7 @@ import streamlit as st
 
 st.set_page_config(
     page_title="Bling Dashboard",
-    page_icon="📊",
+    page_icon="assets/aku-favicon.png",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
